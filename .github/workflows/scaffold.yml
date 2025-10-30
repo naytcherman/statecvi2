@@ -1,0 +1,288 @@
+name: Scaffold
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  scaffold:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Create folders
+        run: |
+          mkdir -p apps/frontend apps/functions docs .github/workflows
+
+      # --- FRONTEND (React + TS via Vite) ---
+      - name: Scaffold React app
+        run: |
+          npm create vite@latest apps/frontend -- --template react-ts
+          cd apps/frontend
+          npm pkg set name="@statecvi/frontend"
+          npm i @azure/msal-browser @azure/msal-react axios react-router-dom react-hook-form yup react-signature-canvas
+          # basic routing-aware App and MSAL config
+          cat > src/auth.msalConfig.ts <<'EOF'
+          import { Configuration, LogLevel } from "@azure/msal-browser";
+          export const msalConfig: Configuration = {
+            auth: {
+              clientId: import.meta.env.VITE_B2C_CLIENT_ID || "REPLACE_ME",
+              authority: `https://${import.meta.env.VITE_B2C_TENANT}.b2clogin.com/${import.meta.env.VITE_B2C_TENANT}.onmicrosoft.com/${import.meta.env.VITE_B2C_POLICY}`,
+              knownAuthorities: [`${import.meta.env.VITE_B2C_TENANT}.b2clogin.com`],
+              redirectUri: import.meta.env.VITE_REDIRECT_URI || "http://localhost:5173"
+            },
+            cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false },
+            system: { loggerOptions: { logLevel: LogLevel.Warning } }
+          };
+          export const apiScopes = [import.meta.env.VITE_B2C_API_SCOPE || ""];
+          EOF
+
+          cat > src/main.tsx <<'EOF'
+          import React from 'react'
+          import ReactDOM from 'react-dom/client'
+          import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+          import App from './App.tsx'
+          import './index.css'
+          ReactDOM.createRoot(document.getElementById('root')!).render(
+            <React.StrictMode>
+              <BrowserRouter>
+                <Routes>
+                  <Route path="/*" element={<App />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </BrowserRouter>
+            </React.StrictMode>
+          )
+          EOF
+
+          cat > src/App.tsx <<'EOF'
+          import { useState } from 'react'
+          import { Link, Routes, Route } from 'react-router-dom'
+
+          function Home() {
+            return (
+              <div style={{padding: 24}}>
+                <h2>statecvi2 — MVP scaffold</h2>
+                <p>Front end is up. Configure B2C and API base URL next.</p>
+                <ul>
+                  <li><Link to="/vet">Vet Portal</Link></li>
+                  <li><Link to="/owner">Owner Portal</Link></li>
+                </ul>
+              </div>
+            )
+          }
+
+          function VetPortal() {
+            return <div style={{padding: 24}}><h3>Vet Portal</h3><p>New CVI, Drafts, Submissions…</p></div>
+          }
+
+          function OwnerPortal() {
+            return <div style={{padding: 24}}><h3>Owner Portal</h3><p>Request CVI, Animals, Certificates…</p></div>
+          }
+
+          export default function App() {
+            // placeholder; MSAL + protected routes to be wired after B2C config
+            return (
+              <Routes>
+                <Route path="/" element={<Home />} />
+                <Route path="/vet/*" element={<VetPortal />} />
+                <Route path="/owner/*" element={<OwnerPortal />} />
+              </Routes>
+            )
+          }
+          EOF
+
+          cat > .env.example <<'EOF'
+          VITE_API_BASE=http://localhost:7071/api
+          VITE_B2C_TENANT=yourtenant
+          VITE_B2C_CLIENT_ID=your-spa-client-id
+          VITE_B2C_POLICY=B2C_1_signup_signin
+          VITE_B2C_API_SCOPE=api://your-api-app-id/access
+          VITE_REDIRECT_URI=http://localhost:5173
+          EOF
+
+      # --- BACKEND (Azure Functions + TS) ---
+      - name: Scaffold Azure Functions (TypeScript)
+        run: |
+          cd apps/functions
+          npm init -y
+          npm pkg set name="@statecvi/functions"
+          npm i @azure/functions @azure/cosmos axios pdf-lib xmlbuilder2
+          npm i -D typescript @types/node
+          npx tsc --init --rootDir src --outDir dist --esModuleInterop --resolveJsonModule --module commonjs --target ES2020
+          mkdir -p src/functions/CreateCvi src/functions/GetStateRequirements
+          cat > host.json <<'EOF'
+          {
+            "version": "2.0",
+            "extensionBundle": { "id": "Microsoft.Azure.Functions.ExtensionBundle", "version": "[3.*, 4.0.0)" }
+          }
+          EOF
+
+          cat > package.json <<'EOF'
+          {
+            "name": "@statecvi/functions",
+            "version": "0.1.0",
+            "type": "commonjs",
+            "scripts": {
+              "build": "tsc -p tsconfig.json",
+              "start": "func start",
+              "start:watch": "tsc -w & func start"
+            },
+            "dependencies": {
+              "@azure/cosmos": "^3.18.0",
+              "@azure/functions": "^4.4.0",
+              "axios": "^1.7.0",
+              "pdf-lib": "^1.17.1",
+              "xmlbuilder2": "^3.1.1"
+            },
+            "devDependencies": {
+              "@types/node": "^20.8.10",
+              "typescript": "^5.4.5"
+            }
+          }
+          EOF
+
+          # Create CVI (stub)
+          cat > src/functions/CreateCvi/function.json <<'EOF'
+          {
+            "bindings": [
+              {
+                "authLevel": "anonymous",
+                "type": "httpTrigger",
+                "direction": "in",
+                "name": "req",
+                "methods": [ "post" ],
+                "route": "vets/{vetId}/cvis"
+              },
+              { "type": "http", "direction": "out", "name": "res" }
+            ]
+          }
+          EOF
+          cat > src/functions/CreateCvi/index.ts <<'EOF'
+          import { AzureFunction, Context, HttpRequest } from "@azure/functions";
+
+          const httpTrigger: AzureFunction = async function (context: Context, req: HttpRequest): Promise<void> {
+            // TODO: validate JWT via EasyAuth, parse payload, write to Cosmos, generate PDF/XML, email
+            const vetId = context.bindingData.vetId;
+            const body = req.body || {};
+            context.res = {
+              status: 201,
+              jsonBody: {
+                message: "CVI draft created (stub). Wire Cosmos + schema mapping next.",
+                vetId,
+                received: body
+              }
+            };
+          };
+          export default httpTrigger;
+          EOF
+
+          # Get State Requirements (stub)
+          cat > src/functions/GetStateRequirements/function.json <<'EOF'
+          {
+            "bindings": [
+              {
+                "authLevel": "anonymous",
+                "type": "httpTrigger",
+                "direction": "in",
+                "name": "req",
+                "methods": [ "get" ],
+                "route": "stateRequirements/{state}"
+              },
+              { "type": "http", "direction": "out", "name": "res" }
+            ]
+          }
+          EOF
+          cat > src/functions/GetStateRequirements/index.ts <<'EOF'
+          import { AzureFunction, Context, HttpRequest } from "@azure/functions";
+          const httpTrigger: AzureFunction = async function (context: Context, req: HttpRequest): Promise<void> {
+            const state = (context.bindingData.state || "").toUpperCase();
+            // TODO: fetch from Cosmos 'StateRequirements' container
+            context.res = { status: 200, jsonBody: { state, requirements: [], lastUpdated: null } };
+          };
+          export default httpTrigger;
+          EOF
+
+      # --- ROOT README and CI workflow ---
+      - name: Root README
+        run: |
+          cat > README.md <<'EOF'
+          # statecvi2
+
+          Monorepo scaffold:
+          - apps/frontend: React + TypeScript (Vite)
+          - apps/functions: Azure Functions + TypeScript
+          - .github/workflows: CI and scaffold
+
+          ## Quickstart (local)
+          1) Frontend
+             cd apps/frontend
+             cp .env.example .env
+             npm i
+             npm run dev
+          2) Backend
+             cd apps/functions
+             npm i
+             # install Azure Functions Core Tools locally for `func start`
+             npm run build
+             # func start  (after you install core tools)
+          3) Configure Azure AD B2C + Cosmos + Azure Functions when ready.
+
+          ## Next
+          - Wire Cosmos SDK in functions
+          - Implement schema-true XML/PDF generation
+          - Secure endpoints with B2C (EasyAuth) + CORS
+          EOF
+
+      - name: Add CI workflow
+        run: |
+          cat > .github/workflows/ci.yml <<'EOF'
+          name: CI
+
+          on:
+            push:
+              branches: [ main ]
+            pull_request:
+
+          jobs:
+            build-frontend:
+              runs-on: ubuntu-latest
+              defaults:
+                run:
+                  working-directory: apps/frontend
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-node@v4
+                  with: { node-version: '20' }
+                - run: npm ci
+                - run: npm run build
+
+            build-functions:
+              runs-on: ubuntu-latest
+              defaults:
+                run:
+                  working-directory: apps/functions
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-node@v4
+                  with: { node-version: '20' }
+                - run: npm ci
+                - run: npm run build
+          EOF
+
+      - name: Create pull request with scaffold
+        uses: peter-evans/create-pull-request@v5
+        with:
+          commit-message: "Scaffold: React + Azure Functions skeleton"
+          title: "Scaffold: initial project structure"
+          body: "Auto-generated skeleton for statecvi2 (frontend + backend + CI)."
+          branch: scaffold/initial
